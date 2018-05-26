@@ -1,0 +1,645 @@
+
+# coding: utf-8
+
+# In[2]:
+
+
+
+# importing libraries
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+
+from datetime import datetime
+from datetime import date
+from statsmodels.tsa import stattools
+from statsmodels.tsa import api as tsa
+from statsmodels.formula import api as smf
+from statsmodels.graphics import gofplots as sm
+from statsmodels.tsa.stattools import acf, pacf
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.arima_model import ARIMA
+
+# get the energy_dataset
+energy_dataset = pd.read_csv("C:/Users/kriti/Desktop/Advance R/energydata_complete.csv", sep=",")
+
+energy_dataset.shape
+energy_dataset.head(5)
+
+energy_dataset.dtypes
+
+print(energy_dataset.corr())
+
+#dropping the last two random variables and visibility features as they have very little correlation with other features
+energy_dataset = energy_dataset.drop(['Visibility','rv1','rv2'],axis = 1)
+print(energy_dataset.corr().head(2))
+
+# correlation matrix
+plt.matshow(energy_dataset.corr())
+plt.xticks(range(len(energy_dataset.columns)), energy_dataset.columns)
+plt.yticks(range(len(energy_dataset.columns)), energy_dataset.columns)
+plt.colorbar()
+plt.show()
+
+print(energy_dataset[['Appliances','lights']].corr())
+
+energy_dataset['date'] = pd.to_datetime(energy_dataset['date'])
+
+# taking only the appliances and lights energy data in seperate dataframes for doing time series analysis
+appliances_energy_data = energy_dataset.iloc[:,[0,1]]
+lights_energy_data = energy_dataset.iloc[:,[0,2]]
+
+# a combination of both
+applianes_n_lights = energy_dataset.iloc[:,[0,1,2]]
+
+plt.style.use('ggplot')
+
+##-----------------All Functions----------------------------------
+
+def hour_part(dt):
+    lt_split = str(dt).split(" ")
+    time_split = lt_split[1].split(":") 
+    time = ":".join([time_split[0],"00","00"])
+    return " ".join([lt_split[0], time])
+
+def alpha_day_of_week(dt):
+    weekday = dt.weekday()
+    if weekday == 0:
+        return 'Mon'
+    elif weekday == 1:
+        return 'Tue'
+    elif weekday == 2:
+        return 'Wed'
+    elif weekday == 3:
+        return 'Thu'
+    elif weekday == 4:
+        return 'Fri'
+    elif weekday == 5:
+        return 'Sat'
+    elif weekday == 6:
+        return 'Sun'
+
+# method to check for stationarity
+# H0: Series is stationary
+# HA: Series is non stationary
+# if the p-value is less than 0.05 then our series is not stationary
+def repkpss(xdata,level=0.05):
+    xdata = xdata.copy()
+    lag_order = int(np.log10(xdata.shape[0]))
+    trend = False
+    for diffs in range(6):
+        kpss = stattools.kpss(xdata,regression='c',lags=lag_order)
+        p_value = kpss[1]
+        if p_value > level:
+            break
+        kpss = stattools.kpss(xdata,regression='ct',lags=lag_order)
+        p_value = kpss[1]
+        if p_value > level:
+            trend = True
+            break
+        xdata = xdata.diff()[1:]
+    return(diffs,trend,kpss)
+    
+def RMSE(predicted, actual):
+    mse = (predicted - actual)**2
+    rmse = np.sqrt(mse.sum()/mse.count())
+    return rmse
+
+def ts_plot(y, lags=None, title=''):
+    '''
+    Calculate acf, pacf, histogram, and qq plot for a given time series
+    '''
+    # if time series is not a Series object, make it so
+    if not isinstance(y, pd.Series):
+        y = pd.Series(y)
+    
+    # initialize figure and axes
+    fig = plt.figure(figsize=(14, 12))
+    layout = (3, 2)
+    ts_ax = plt.subplot2grid(layout, (0, 0), colspan=2)
+    acf_ax = plt.subplot2grid(layout, (1, 0))
+    pacf_ax = plt.subplot2grid(layout, (1, 1))
+    qq_ax = plt.subplot2grid(layout, (2, 0))
+    hist_ax = plt.subplot2grid(layout, (2, 1))
+    
+    # time series plot
+    y.plot(ax=ts_ax)
+    plt.legend(loc='best')
+    ts_ax.set_title(title);
+    
+    # acf and pacf
+    tsa.graphics.plot_acf(y, lags=lags, ax=acf_ax, alpha=0.5)
+    tsa.graphics.plot_pacf(y, lags=lags, ax=pacf_ax, alpha=0.5) 
+    
+    # qq plot
+    sm.qqplot(y, line='s', ax=qq_ax)
+    qq_ax.set_title('Normal QQ Plot')
+    
+    # hist plot
+    y.plot(ax=hist_ax, kind='hist', bins=25);
+    hist_ax.set_title('Histogram');
+    plt.tight_layout();
+    plt.show()
+    return
+
+def adf(ts):
+    
+    # Determing rolling statistics
+    rolmean = pd.rolling_mean(ts, window=12)
+    rolstd = pd.rolling_std(ts, window=12)
+
+    #Plot rolling statistics:
+    orig = plt.plot(ts, color='blue',label='Original')
+    mean = plt.plot(rolmean, color='red', label='Rolling Mean')
+    std = plt.plot(rolstd, color='black', label = 'Rolling Std')
+    plt.legend(loc='best')
+    plt.title('Rolling Mean & Standard Deviation')
+    plt.show(block=False)
+    
+    # Calculate ADF factors
+    adftest = adfuller(ts, autolag='AIC')
+    adfoutput = pd.Series(adftest[0:4], index=['Test Statistic','p-value','# of Lags Used',
+                                              'Number of Observations Used'])
+    for key,value in adftest[4].items():
+        adfoutput['Critical Value (%s)'%key] = value
+    return adfoutput
+
+#---------------------------------------------------------------------
+    
+appliances_energy_data['month_of_year'] = appliances_energy_data['date'].apply(lambda x: x.month)
+appliances_energy_data['day_of_month'] = appliances_energy_data['date'].apply(lambda x: x.day)
+appliances_energy_data['day_of_week'] = appliances_energy_data['date'].apply(lambda x: x.weekday())
+appliances_energy_data['hour_of_day'] = appliances_energy_data['date'].apply(lambda x: x.hour)
+appliances_energy_data['only_date'] = appliances_energy_data['date'].apply(lambda x: x.date())
+
+lights_energy_data['month_of_year'] = appliances_energy_data['date'].apply(lambda x: x.month)
+lights_energy_data['day_of_month'] = appliances_energy_data['date'].apply(lambda x: x.day)
+lights_energy_data['day_of_week'] = appliances_energy_data['date'].apply(lambda x: x.weekday())
+lights_energy_data['hour_of_day'] = appliances_energy_data['date'].apply(lambda x: x.hour)
+lights_energy_data['only_date'] = appliances_energy_data['date'].apply(lambda x: x.date())
+
+# now from this plot it is not much clear as we have lots of data
+plt.plot(appliances_energy_data['date'],appliances_energy_data['Appliances'])
+plt.xlabel("Time")
+plt.ylabel("Appliances Wh")
+plt.title("Energy consumption by appliances over months")
+plt.show()
+
+plt.plot(lights_energy_data['date'],lights_energy_data['lights'])
+plt.xlabel("Time")
+plt.ylabel("Lights Wh")
+plt.title("Energy consumption by lights over months")
+plt.show()
+
+# pivoting the data of appliances
+energy_dataset_app_energy_pivot = pd.pivot_table(appliances_energy_data, values = 'Appliances',
+                                      columns = 'month_of_year', index = 'day_of_month') 
+
+energy_dataset_app_energy_pivot.plot(title = 'Appliance energy consumption for each day of months from Jan to May')
+
+
+energy_dataset_app_energy_pivot.plot(subplots = True, layout = (1,5), sharey=True)
+
+# pivoting the data of lights
+energy_dataset_lights_energy_pivot = pd.pivot_table(lights_energy_data, values = 'lights',
+                                      columns = 'month_of_year', index = 'day_of_month') 
+energy_dataset_lights_energy_pivot.plot(title = 'Light energy consumption for each day of months from Jan to May')
+
+energy_dataset_lights_energy_pivot.plot(subplots = True, layout = (1,5), sharey=True)
+
+
+#combined plots of appliances and lights
+applianes_n_lights.plot(kind = "line", x = applianes_n_lights.index, y = ['Appliances','lights'])
+
+
+# creating another column specifying if day is a weekend or not
+appliances_energy_data['weekend_status'] = appliances_energy_data['day_of_week'].apply(lambda x: 0 if x < 5 else 1)
+
+appliances_energy_data["start_hour"] = appliances_energy_data["date"].apply(hour_part)
+
+# creating another dataframe by aggregating data from the previous one
+appliances_energy_data_per_hour = pd.DataFrame(appliances_energy_data.groupby("start_hour")['Appliances'].agg('sum'))
+appliances_energy_data_per_hour = appliances_energy_data_per_hour.reset_index()
+
+# converting object to timestamp
+appliances_energy_data_per_hour['start_hour'] = pd.to_datetime(appliances_energy_data_per_hour['start_hour'])
+
+# creating new features like alphabateical days of week, hour, week of year
+appliances_energy_data_per_hour['day_of_week'] = appliances_energy_data_per_hour['start_hour'].apply(alpha_day_of_week)
+appliances_energy_data_per_hour['hour_of_day'] = appliances_energy_data_per_hour['start_hour'].apply(lambda x: x.hour)
+appliances_energy_data_per_hour['week_of_year'] = appliances_energy_data_per_hour['start_hour'].apply(lambda x: x.isocalendar()[1])
+
+# data from second week till 21st week of the year
+appliances_energy_data_per_hour['week_of_year'].unique()
+
+# dataframes for first 3 weeks
+appliances_energy_data_per_hour_w1 = pd.DataFrame(appliances_energy_data_per_hour.loc[appliances_energy_data_per_hour['week_of_year'] == 2,:])
+appliances_energy_data_per_hour_w2 = pd.DataFrame(appliances_energy_data_per_hour.loc[appliances_energy_data_per_hour['week_of_year'] == 3,:])
+appliances_energy_data_per_hour_w3 = appliances_energy_data_per_hour[appliances_energy_data_per_hour.week_of_year == 4]
+
+# Last three weeks
+appliances_energy_data_per_hour_w19 = pd.DataFrame(appliances_energy_data_per_hour.loc[appliances_energy_data_per_hour['week_of_year'] == 19,:])
+appliances_energy_data_per_hour_w20 = pd.DataFrame(appliances_energy_data_per_hour.loc[appliances_energy_data_per_hour['week_of_year'] == 20,:])
+appliances_energy_data_per_hour_w21 = appliances_energy_data_per_hour[appliances_energy_data_per_hour.week_of_year == 21]
+
+# creating the pivot table for heatmap using seaborn
+appliances_energy_data_per_hour_w1.pivot('hour_of_day','day_of_week')['Appliances'].head(50)
+
+plt.figure(figsize=(6,23))
+pivot_table_w1 = appliances_energy_data_per_hour_w1.pivot('hour_of_day','day_of_week')['Appliances']
+plt.xlabel('Day of week', size = 15)
+plt.ylabel('Hour of day', size = 15)
+plt.title('Energy distribution of Appliances for first week', size = 15)
+sns.heatmap(pivot_table_w1, annot = False, fmt = ".1f", linewidths=.5, square = False, cmap = 'Blues_r')
+
+plt.figure(figsize=(6,23))
+pivot_table_w2 = appliances_energy_data_per_hour_w2.pivot('hour_of_day','day_of_week')['Appliances']
+plt.xlabel('Day of week', size = 15)
+plt.ylabel('Hour of day', size = 15)
+plt.title('Energy distribution of Appliances for second week', size = 15)
+sns.heatmap(pivot_table_w2, annot = False, fmt = ".1f", linewidths=.5, square = False, cmap = 'icefire_r')
+
+plt.figure(figsize=(6,23))
+pivot_table_w1 = appliances_energy_data_per_hour_w3.pivot('hour_of_day','day_of_week')['Appliances']
+plt.xlabel('Day of week', size = 15)
+plt.ylabel('Hour of day', size = 15)
+plt.title('Energy distribution of Appliances for third week', size = 15)
+sns.heatmap(pivot_table_w1, annot = False, fmt = ".1f", linewidths=.5, square = False, cmap = 'spring_r')
+
+plt.figure(figsize=(6,23))
+pivot_table_w2 = appliances_energy_data_per_hour_w19.pivot('hour_of_day','day_of_week')['Appliances']
+plt.xlabel('Day of week', size = 15)
+plt.ylabel('Hour of day', size = 15)
+plt.title('Energy distribution of Appliances for third last week', size = 15)
+sns.heatmap(pivot_table_w2, annot = False, fmt = ".1f", linewidths=.5, square = False, cmap = 'inferno_r')
+
+plt.figure(figsize=(6,23))
+pivot_table_w1 = appliances_energy_data_per_hour_w20.pivot('hour_of_day','day_of_week')['Appliances']
+plt.xlabel('Day of week', size = 15)
+plt.ylabel('Hour of day', size = 15)
+plt.title('Energy distribution of Appliances for second last week', size = 15)
+sns.heatmap(pivot_table_w1, annot = False, fmt = ".1f", linewidths=.5, square = False, cmap = 'spectral_r')
+
+plt.figure(figsize=(6,23))
+pivot_table_w2 = appliances_energy_data_per_hour_w21.pivot('hour_of_day','day_of_week')['Appliances']
+plt.xlabel('Day of week', size = 15)
+plt.ylabel('Hour of day', size = 15)
+plt.title('Energy distribution of Appliances for last week', size = 15)
+sns.heatmap(pivot_table_w2, annot = False, fmt = ".1f", linewidths=.5, square = False, cmap = 'winter_r')
+   
+# another dataframe that shows the cummulative energy consumption for each day of week
+appliances_energy_data_each_day_of_week = pd.DataFrame(
+        appliances_energy_data_per_hour.groupby("day_of_week")['Appliances'].agg('sum'))
+appliances_energy_data_each_day_of_week = appliances_energy_data_each_day_of_week.reset_index()
+
+appliances_energy_data_each_day_of_week['Appliances(kW h)'] = appliances_energy_data_each_day_of_week['Appliances']/1000
+appliances_energy_data_each_day_of_week = appliances_energy_data_each_day_of_week.drop(['Appliances'],axis = 1)
+
+for i in range(len(appliances_energy_data_each_day_of_week['day_of_week'])):
+    if (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Mon'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 1
+    elif (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Tue'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 2
+    elif (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Wed'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 3
+    elif (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Thu'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 4
+    elif (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Fri'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 5
+    elif (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Sat'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 6
+    elif (appliances_energy_data_each_day_of_week['day_of_week'].values[i] == 'Sun'):
+        appliances_energy_data_each_day_of_week['day_number'][i] = 7
+ 
+appliances_energy_data_each_day_of_week = appliances_energy_data_each_day_of_week.sort_values(by = ['day_number'])  
+appliances_energy_data_each_day_of_week = appliances_energy_data_each_day_of_week.reset_index()               
+appliances_energy_data_each_day_of_week = appliances_energy_data_each_day_of_week.drop(['index'], axis = 1)
+
+# a line graph of the consumption
+x_pos = np.arange(len(appliances_energy_data_each_day_of_week['day_of_week'].values))
+plt.plot(x_pos,
+         appliances_energy_data_each_day_of_week['Appliances(kW h)'])
+plt.xlabel("Days")
+plt.ylabel("Appliances(KW h)")
+plt.title("Cumultive energy consumption for each day of week")
+plt.xticks(x_pos,appliances_energy_data_each_day_of_week['day_of_week'].values)
+plt.show()
+
+# a barchart of the consumption
+plt.bar(y_pos, appliances_energy_data_each_day_of_week['Appliances(kW h)'],
+                                                       align='center', alpha=0.5)
+plt.xlabel("Days")
+plt.ylabel("Appliances(KW h)")
+plt.title("Cumulative energy consumption for each day of week")
+plt.xticks(y_pos,appliances_energy_data_each_day_of_week['day_of_week'].values)
+plt.show()
+
+# creating a new dataframe for a daily record
+appliances_energy_data_per_day = pd.DataFrame(appliances_energy_data.groupby("only_date")['Appliances'].agg('sum'))
+appliances_energy_data_per_day = appliances_energy_data_per_day.reset_index()
+
+# we can see that the daily energy consumption is stationary with no trend
+appliances_energy_data_per_day['Appliances_kWh'] = appliances_energy_data_per_day['Appliances']/1000
+
+#ts plot
+plt.plot(appliances_energy_data_per_day['Appliances_kWh'])
+plt.xlabel("Days")
+plt.ylabel("Appliances(KW h)")
+plt.title("Time series plot")
+plt.show()
+
+# checking for the stationarity of appliances energy using kpss test
+repkpss(appliances_energy_data['Appliances'])
+
+# checking for the stationarity of light energy using kpss test
+repkpss(lights_energy_data['lights'])
+
+# both the above data are stationary as the p-value is greater than 0.05
+
+#tried applying the var model but it is giving an error
+#applianes_n_lights = applianes_n_lights.set_index('date')
+#
+#var_data = np.log(applianes_n_lights).diff().dropna()
+#
+#var_model = tsa.VAR(var_data)
+#
+#results = var_model.fit().params
+#
+#var_data_2 = np.log(applianes_n_lights)
+#
+#var_model_2 = tsa.VAR(var_data_2)
+#
+#results_2 = var_model_2.fit()
+
+# plot for appliances and lights
+applianes_n_lights.Appliances.plot()
+applianes_n_lights.lights.plot()
+
+# check to check the mean
+applianes_n_lights.Appliances.plot(kind = 'hist', bins = 10)
+
+# as variance is not stable so took a log
+applianes_n_lights['Appliances_log'] = np.log(applianes_n_lights.Appliances)
+
+applianes_n_lights.Appliances_log.plot(kind = 'hist', bins = 10)
+
+applianes_n_lights.Appliances_log.plot()
+
+# creating simple models now
+# 1.Mean constant Model
+# 2.Linear Trend Model
+# 3.Random Walk Model
+
+#model_mean_pred = applianes_n_lights.Appliances_log.mean()
+#
+#applianes_n_lights['Appliances_mean'] = np.exp(model_mean_pred)
+#
+#applianes_n_lights.plot(kind = 'line', y = ['Appliances','Appliances_mean'])
+#
+#
+#model_mean_RMSE  = RMSE(applianes_n_lights.Appliances_mean, applianes_n_lights.Appliances)
+#model_mean_RMSE
+#
+model_mean_results = pd.DataFrame(columns = ["Model","Forecast","RMSE"])
+model_mean_results.head()
+#
+#model_mean_results.loc[0,"Model"] = "Mean Constant"
+#model_mean_results.loc[0,"Forecast"] = np.exp(model_mean_pred)
+#model_mean_results.loc[0,"RMSE"] = model_mean_RMSE
+#model_mean_results.head()
+
+# models for daily records
+# 1. Mean Constant Model
+appliances_energy_data_per_day['Appliances_mean'] = appliances_energy_data_per_day['Appliances_kWh'].mean()
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_mean'])
+plt.xlabel("Days")
+plt.ylabel("Appliances kWh")
+plt.legend()
+plt.title("Daily energy consumption alongside constant mean model")
+plt.show()
+
+model_mean_results.loc[1,"Model"] = "Mean Constant"
+model_mean_results.loc[1,"Forecast"] = appliances_energy_data_per_day['Appliances_kWh'].mean()
+model_mean_results.loc[1,"RMSE"] = RMSE(appliances_energy_data_per_day['Appliances_mean'], 
+                                  appliances_energy_data_per_day['Appliances_kWh'])
+model_mean_results.head()
+
+# 2.Linear Trend Model
+appliances_energy_data_per_day.head()
+appliances_energy_data_per_day.dtypes
+appliances_energy_data_per_day.index.min()
+
+# Convert date in datetimedelta figure starting from zero
+appliances_energy_data_per_day["timeIndex"] = [appliances_energy_data_per_day.only_date - appliances_energy_data_per_day.only_date.min()]
+appliances_energy_data_per_day.dtypes
+
+appliances_energy_data_per_day = appliances_energy_data_per_day.rename(columns = {'Appliances (kW h)' : 'Appliances_kWh'})
+
+# convertinf timedelta to int with the below formula
+appliances_energy_data_per_day["timeIndex"] = (appliances_energy_data_per_day["timeIndex"]/np.timedelta64(1, 'D')).astype(int)
+
+## Now plot linear regression between Appliances kW h and timeIndex
+model_linear = smf.ols('Appliances_kWh ~ timeIndex', 
+                       data = appliances_energy_data_per_day).fit()
+model_linear.summary()
+
+## Parameters for y = mx + c equation## Param 
+model_linear.params
+
+c = model_linear.params[0]
+c
+m = model_linear.params[1]
+m
+
+model_linear_pred = model_linear.predict()
+
+model_linear_pred
+
+# residul plot
+model_linear.resid.plot(kind = "bar")
+
+appliances_energy_data_per_day['appliances_linear'] = model_linear_pred
+
+# plot for linear model
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_linear'])
+plt.xlabel("Days")
+plt.ylabel("Appliances_kWh")
+plt.legend()
+plt.title("Daily energy consumption alongside linear model")
+plt.show()
+
+
+# Manual Calculation# Manual 
+model_linear_forecast_manual = m * 138 + c
+model_linear_forecast_manual
+
+
+model_mean_results.loc[2,"Model"] = "Linear"
+model_mean_results.loc[2,"Forecast"] = model_linear_forecast_manual
+model_mean_results.loc[2,"RMSE"] = RMSE(appliances_energy_data_per_day['appliances_linear'], 
+                                  appliances_energy_data_per_day['Appliances_kWh'])
+model_mean_results.head()
+
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_mean'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['appliances_linear'])
+plt.xlabel("Days")
+plt.ylabel("Appliances_kWh")
+plt.title("Daily energy consumption")
+plt.show()
+
+# following the article http://dacatay.com/data-science/part-1-time-series-basics-python/
+# for the dataframe appliances energy data per day
+
+data = appliances_energy_data_per_day['Appliances_kWh']
+# build scatterplot
+ncols = 3
+nrows = 3
+lags = 9
+ 
+fig, axes = plt.subplots(ncols=ncols, nrows=nrows, figsize=(3 * ncols, 3 * nrows))
+ 
+for ax, lag in zip(axes.flat, np.arange(1, lags + 1, 1)):
+    lag_str = 't-{}'.format(lag)
+    X = (pd.concat([data, data.shift(-lag)], axis=1, keys=['y']+[lag_str]).dropna())
+    
+    # plot data
+    X.plot(ax=ax, kind='scatter', y='y', x=lag_str);
+    corr = X.corr().as_matrix()[0][1]
+    ax.set_ylabel('Original');
+    ax.set_title('Lag: {} (corr={:.2f})'.format(lag_str, corr));
+    ax.set_aspect('equal');
+    
+    # top and right spine from plot
+    sns.despine();
+ 
+fig.tight_layout()
+plt.show()
+
+ts_plot(data)
+adf(data)
+
+
+# simple moving average model
+
+# For smoothing the values we can use 12 month Moving Averages 
+appliances_energy_data_per_day['Appliances_kWh_MA12'] = pd.rolling_mean(appliances_energy_data_per_day['Appliances_kWh'], window = 12)
+
+appliances_energy_data_per_day.plot(kind = 'line', y = ['Appliances_kWh_MA12','Appliances_kWh'])
+
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_MA12'])
+plt.xlabel("Days")
+plt.ylabel("Appliances_kWh")
+plt.legend()
+plt.title("Daily energy consumption alongside moving average for 12 months")
+plt.show()
+
+model_MA12_forecast = appliances_energy_data_per_day['Appliances_kWh_MA12'].tail(12).mean()
+
+model_MA12_RMSE = RMSE(appliances_energy_data_per_day['Appliances_kWh_MA12'], 
+                       appliances_energy_data_per_day['Appliances_kWh'])
+model_MA12_RMSE
+
+model_mean_results.loc[3,"Model"] = "Moving Average 12"
+model_mean_results.loc[3,"Forecast"] = model_MA12_forecast
+model_mean_results.loc[3,"RMSE"] = model_MA12_RMSE
+model_mean_results.head()
+
+appliances_energy_data_per_day = appliances_energy_data_per_day.rename(columns = {'Appliances_linear':'Appliances_kWh_linear'})
+appliances_energy_data_per_day = appliances_energy_data_per_day.rename(columns = {'Appliances_mean':'Appliances_kWh_mean'})
+appliances_energy_data_per_day = appliances_energy_data_per_day.rename(columns = {'appliances_linear':'Appliances_linear'})
+appliances_energy_data_per_day.plot(kind = 'line', y = ['Appliances_kWh','Appliances_kWh_mean','Appliances_kWh_linear','Appliances_kWh_MA12'])
+
+# Random walk model
+
+appliances_energy_data_per_day['Appliances_kWh_shift1'] = appliances_energy_data_per_day['Appliances_kWh'].shift()
+appliances_energy_data_per_day['Appliances_kWh_Diff'] = appliances_energy_data_per_day['Appliances_kWh'] - appliances_energy_data_per_day['Appliances_kWh_shift1'] 
+
+appliances_energy_data_per_day['Appliances_kWh_Diff'].plot()
+appliances_energy_data_per_day['Appliances_kWh_shift1'].plot()
+
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_Diff'])
+plt.xlabel("Days")
+plt.ylabel("Appliances_kWh")
+plt.title("Daily energy consumption along side first difference")
+plt.legend()
+plt.show()
+
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'])
+plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_shift1'])
+plt.xlabel("Days")
+plt.ylabel("Appliances_kWh")
+plt.legend()
+plt.title("Daily energy consumption along side first shift")
+plt.show()
+
+model_random_RMSE = RMSE(appliances_energy_data_per_day.Appliances_kWh_shift1, 
+                         appliances_energy_data_per_day.Appliances_kWh)
+model_random_RMSE
+
+model_mean_results.loc[4,"Model"] = "Random Walk"
+model_mean_results.loc[4,"Forecast"] = appliances_energy_data_per_day['Appliances_kWh_shift1'].iloc[-1]
+model_mean_results.loc[4,"RMSE"] = model_random_RMSE
+model_mean_results.head()
+
+appliances_energy_data_per_day.plot(kind = 'line', y = ['Appliances_kWh','Appliances_kWh_mean','Appliances_kWh_linear','Appliances_kWh_MA12','Appliances_kWh_shift1'])
+
+original, = plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh'], label = "Original")
+mean, = plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_mean'], label = "Constant Mean")
+linear, = plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_linear'], label = "Linear Model")
+moving_avg, = plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_MA12'], label = "Moving Average")
+random_walk, = plt.plot(appliances_energy_data_per_day.only_date,
+         appliances_energy_data_per_day['Appliances_kWh_shift1'], label = "Random Walk")
+plt.xlabel("Days")
+plt.ylabel("Appliances energy in kWh")
+plt.title("Daily energy consumption using all four models and original plot")
+plt.legend(handles=[original,mean,linear,moving_avg,random_walk])
+plt.show()
+
+# after first differencing also it is stationary
+diff = appliances_energy_data_per_day['Appliances_kWh_Diff']
+diff.dropna(inplace = True)
+adf(diff)
+
+# ARIMA Model
+
+#ACF and PACF plots:
+lag_acf = acf(diff, nlags=10)
+lag_acf
+
+ACF = pd.Series(lag_acf)
+
+ACF.plot(kind = "bar")
+
+lag_pacf = pacf(diff, nlags=10, method='ols')
+
+PACF = pd.Series(lag_pacf)
+PACF.plot(kind = "bar")
+
+# Running the ARIMA Model(1,0,1)
+model_AR1MA = ARIMA(diff, order=(1,0,1))
+
+# for doing ARIMA we need date as Index
+
